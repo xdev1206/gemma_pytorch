@@ -735,6 +735,15 @@ class GemmaForCausalLM(nn.Module):
     return results[0] if is_str_prompt else results
 
   def load_weights(self, model_path: str):
+        if os.path.isdir(model_path) and os.path.isfile(
+                os.path.join(model_path, "model.safetensors")):
+            from gemma import checkpoint
+            checkpoint.load_gemma3_text_safetensors(self, model_path)
+            return
+        if os.path.isfile(model_path) and model_path.endswith(".safetensors"):
+            from gemma import checkpoint
+            checkpoint.load_gemma3_text_safetensors(self, model_path)
+            return
         if os.path.isfile(model_path):
             self.load_state_dict(
                 torch.load(

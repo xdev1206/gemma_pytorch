@@ -1,0 +1,74 @@
+{
+  "models": [
+    {
+      "id": "gemma-3-1b-it",
+      "path": "models/gemma-3-1b-it",
+      "variant": "1b",
+      "status": "runtime-smoke-aligned",
+      "checkpoint": "model.safetensors",
+      "tokenizer": "tokenizer.model",
+      "text_prompts": [
+        "The capital of Italy is",
+        "Explain gravity in one sentence."
+      ],
+      "runtime_baseline": {
+        "device": "cuda",
+        "seed": 12345,
+        "output_len": 2,
+        "prompt": "The capital of Italy is",
+        "expected_output": " Rome."
+      }
+    },
+    {
+      "id": "gemma-4-E2B-it",
+      "path": "models/gemma-4-E2B-it",
+      "variant": "E2B",
+      "status": "runtime-token-aligned-numerical-pending",
+      "checkpoint": "model.safetensors",
+      "tokenizer": "tokenizer.json",
+      "runtime_baseline": {
+        "device": "cuda",
+        "dtype": "bfloat16",
+        "prompt": "The capital of Italy is",
+        "expected_next_token_id": 5279,
+        "expected_next_token": " capital",
+        "multimodal_prompt": "Caption this image.",
+        "multimodal_image": "golden_test_image",
+        "multimodal_expected_next_token_id": 106,
+        "multimodal_expected_next_token": "<turn|>",
+        "multimodal_mean_abs_logit_error": 0.209
+      },
+      "text_prompts": [
+        "The capital of Italy is",
+        "Explain gravity in one sentence."
+      ]
+    }
+  ],
+  "images": [
+    {
+      "id": "golden_test_image",
+      "path": "scripts/images/test_image.jpg",
+      "purpose": "single-image preprocessing and multimodal smoke test"
+    },
+    {
+      "id": "cow_in_beach",
+      "path": "scripts/images/cow_in_beach.jpg",
+      "purpose": "single-image captioning alignment"
+    }
+  ],
+  "multimodal_prompts": [
+    {
+      "id": "single-image-caption",
+      "elements": ["image:golden_test_image", "Caption this image."]
+    },
+    {
+      "id": "interleaved-images",
+      "elements": [
+        "This image",
+        "image:cow_in_beach",
+        "and this image",
+        "image:golden_test_image"
+      ]
+    }
+  ]
+}
