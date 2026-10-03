@@ -29,9 +29,9 @@ class Gemma4RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        normalized = hidden_states.float() * torch.rsqrt(
-            hidden_states.float().pow(2).mean(-1, keepdim=True) + self.eps
-        )
+        hidden_states_fp32 = hidden_states.float()
+        mean_squared = hidden_states_fp32.pow(2).mean(-1, keepdim=True) + self.eps
+        normalized = hidden_states_fp32 * torch.pow(mean_squared, -0.5)
         if self.with_scale:
             normalized = normalized * self.weight.float()
         return normalized.type_as(hidden_states)
@@ -69,10 +69,14 @@ class Gemma4Attention(nn.Module):
         if rotated_pairs < half_dim:
             inv_freq = torch.cat((inv_freq, torch.zeros(
                 half_dim - rotated_pairs, device=states.device)))
-        freqs = torch.outer(positions, inv_freq)
+        # Match the reference RoPE construction: use the same batched matrix
+        # multiplication and sequence-first layout before computing cos/sin.
+        inv_freq_expanded = inv_freq[None, :, None]
+        positions_expanded = positions[None, None, :]
+        freqs = (inv_freq_expanded @ positions_expanded).transpose(1, 2)
         emb = torch.cat((freqs, freqs), dim=-1)
-        cos = emb.cos()[None, :, None, :]
-        sin = emb.sin()[None, :, None, :]
+        cos = emb.cos()[:, :, None, :].to(dtype=states.dtype)
+        sin = emb.sin()[:, :, None, :].to(dtype=states.dtype)
         rotate_half = torch.cat((-states[..., self.head_dim // 2:],
                                  states[..., :self.head_dim // 2]), dim=-1)
         return (states * cos + rotate_half * sin).to(dtype=states.dtype)
@@ -99,8 +103,14 @@ class Gemma4Attention(nn.Module):
         if not self.is_kv_shared:
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
-        k = k.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
-        v = v.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
+        num_groups = self.num_heads // self.num_kv_heads
+        # Match the reference GQA layout before the attention matmul.
+        k = k[:, :, None, :, :].expand(
+            batch, self.num_kv_heads, num_groups, length, self.head_dim
+        ).reshape(batch, self.num_heads, length, self.head_dim)
+        v = v[:, :, None, :, :].expand(
+            batch, self.num_kv_heads, num_groups, length, self.head_dim
+        ).reshape(batch, self.num_heads, length, self.head_dim)
         q = q.transpose(1, 2)
         # Gemma 4 uses RMS-normalized q/k and an attention scaling of 1.0.
         scores = torch.matmul(q, k.transpose(-1, -2))
@@ -109,8 +119,12 @@ class Gemma4Attention(nn.Module):
             positions = torch.arange(length, device=hidden_states.device)
             allowed &= positions[None, :] >= positions[:, None] - self.config.sliding_window + 1
         scores = scores.masked_fill(~allowed, torch.finfo(scores.dtype).min)
-        output = torch.softmax(scores.float(), dim=-1) @ v.float()
-        output = output.to(dtype=q.dtype)
+        # Match the reference eager attention kernel: upcast only the
+        # softmax, then cast probabilities back to the query dtype before the
+        # value matmul. Keeping the value matmul in bf16 is material for the
+        # checkpoint's numerical contract.
+        weights = torch.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
+        output = weights @ v
         return self.o_proj(output.transpose(1, 2).reshape(batch, length, -1))
 
 
@@ -195,9 +209,16 @@ class Gemma4TextModel(nn.Module):
         if inputs_embeds is None:
             if input_ids is None:
                 raise ValueError("input_ids or inputs_embeds is required")
-            inputs_embeds = self.embed_tokens(input_ids) * self.config.hidden_size ** 0.5
+            inputs_embeds = self.embed_tokens(input_ids)
+            embed_scale = torch.tensor(
+                self.config.hidden_size ** 0.5,
+                device=inputs_embeds.device,
+                dtype=inputs_embeds.dtype,
+            )
+            inputs_embeds = inputs_embeds * embed_scale
         hidden_states = inputs_embeds
-        context_ple = self.per_layer_model_projection(hidden_states) * self.config.hidden_size ** -0.5
+        context_ple = self.per_layer_model_projection(hidden_states)
+        context_ple = context_ple * self.config.hidden_size ** -0.5
         context_ple = context_ple.view(
             *hidden_states.shape[:-1],
             self.config.num_hidden_layers,
@@ -206,7 +227,12 @@ class Gemma4TextModel(nn.Module):
         context_ple = self.per_layer_projection_norm(context_ple)
         if per_layer_inputs is None and input_ids is not None:
             token_ple = self.embed_tokens_per_layer(input_ids)
-            token_ple = token_ple * self.config.hidden_size_per_layer_input ** 0.5
+            token_ple_scale = torch.tensor(
+                self.config.hidden_size_per_layer_input ** 0.5,
+                device=token_ple.device,
+                dtype=token_ple.dtype,
+            )
+            token_ple = token_ple * token_ple_scale
             token_ple = token_ple.view(
                 *input_ids.shape,
                 self.config.num_hidden_layers,
@@ -310,7 +336,13 @@ class Gemma4ForConditionalGeneration(nn.Module):
         audio_features: torch.Tensor | None = None,
         audio_token_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.model.embed_tokens(input_ids) * self.config.hidden_size ** 0.5
+        inputs_embeds = self.model.embed_tokens(input_ids)
+        embed_scale = torch.tensor(
+            self.config.hidden_size ** 0.5,
+            device=inputs_embeds.device,
+            dtype=inputs_embeds.dtype,
+        )
+        inputs_embeds = inputs_embeds * embed_scale
         if image_patches is not None:
             if pixel_position_ids is None or image_token_mask is None:
                 raise ValueError("image positions and image token mask are required")
@@ -343,7 +375,12 @@ class Gemma4ForConditionalGeneration(nn.Module):
             if audio_token_mask is not None:
                 ple_ids = torch.where(audio_token_mask, self.config.pad_token_id, ple_ids)
             per_layer_inputs = self.model.embed_tokens_per_layer(ple_ids)
-            per_layer_inputs = per_layer_inputs * self.config.hidden_size_per_layer_input ** 0.5
+            token_ple_scale = torch.tensor(
+                self.config.hidden_size_per_layer_input ** 0.5,
+                device=per_layer_inputs.device,
+                dtype=per_layer_inputs.dtype,
+            )
+            per_layer_inputs = per_layer_inputs * token_ple_scale
             per_layer_inputs = per_layer_inputs.view(
                 *ple_ids.shape, self.config.num_hidden_layers,
                 self.config.hidden_size_per_layer_input,
@@ -384,4 +421,12 @@ class Gemma4ForConditionalGeneration(nn.Module):
                 audio_mask = torch.cat(
                     (audio_mask, torch.zeros_like(next_token, dtype=torch.bool)), dim=-1
                 )
+            if torch.isin(
+                next_token,
+                torch.tensor(
+                    self.config.eos_token_ids,
+                    device=next_token.device,
+                ),
+            ).all():
+                break
         return generated

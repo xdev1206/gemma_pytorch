@@ -17,6 +17,7 @@ from pathlib import Path
 class Gemma4TextConfig:
     vocab_size: int = 262144
     pad_token_id: int = 0
+    eos_token_ids: tuple[int, ...] = (1, 106)
     hidden_size: int = 1536
     intermediate_size: int = 6144
     num_hidden_layers: int = 35
@@ -48,10 +49,17 @@ class Gemma4TextConfig:
 
     @classmethod
     def from_json(cls, path: str | Path) -> "Gemma4TextConfig":
-        data = json.loads(Path(path).read_text(encoding="utf-8"))["text_config"]
+        config = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = config["text_config"]
+        eos_token_id = config.get("eos_token_id", 1)
+        if isinstance(eos_token_id, int):
+            eos_token_ids = (eos_token_id,)
+        else:
+            eos_token_ids = tuple(eos_token_id)
         return cls(
             vocab_size=data["vocab_size"],
             pad_token_id=data.get("pad_token_id", 0),
+            eos_token_ids=eos_token_ids,
             hidden_size=data["hidden_size"],
             intermediate_size=data["intermediate_size"],
             num_hidden_layers=data["num_hidden_layers"],

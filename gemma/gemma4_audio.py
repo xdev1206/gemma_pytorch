@@ -33,6 +33,7 @@ class Gemma4AudioConfig:
     residual_weight: float = 0.5
     attention_logit_cap: float = 50.0
     attention_invalid_logits_value: float = -1e9
+    gradient_clipping: float = 1e10
     subsampling_conv_channels: tuple[int, int] = (128, 32)
 
     @classmethod
@@ -52,6 +53,7 @@ class Gemma4AudioConfig:
             residual_weight=data["residual_weight"],
             attention_logit_cap=data["attention_logit_cap"],
             attention_invalid_logits_value=data["attention_invalid_logits_value"],
+            gradient_clipping=data.get("gradient_clipping", 1e10),
             subsampling_conv_channels=tuple(data["subsampling_conv_channels"]),
         )
 
@@ -61,15 +63,25 @@ class Gemma4AudioRelPositionalEncoding(nn.Module):
         super().__init__()
         context = config.attention_chunk_size + config.attention_context_left - 1 + config.attention_context_right
         count = config.hidden_size // 2
-        increment = math.log(10000.0) / max(count - 1, 1)
-        inv = torch.exp(torch.arange(count) * -increment)
+        min_timescale = 1.0
+        max_timescale = 10000.0
+        increment = math.log(max_timescale / min_timescale) / max(count - 1, 1)
+        inv = min_timescale * torch.exp(
+            torch.arange(count, dtype=torch.float32) * -increment
+        )
+        inv = inv.to(dtype=torch.get_default_dtype())
         self.register_buffer("inv_timescales", inv.view(1, 1, -1), persistent=False)
         self.context_size = context
 
+    @torch.no_grad()
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        positions = torch.arange(self.context_size // 2, -1, -1, device=hidden_states.device).view(-1, 1)
-        scaled = positions * self.inv_timescales.to(hidden_states.device)
-        return torch.cat((torch.sin(scaled), torch.cos(scaled)), dim=-1).to(hidden_states.dtype)
+        position_ids = torch.arange(
+            self.context_size // 2, -1, -1, device=hidden_states.device
+        )
+        position_ids = position_ids[..., None]
+        scaled_time = position_ids * self.inv_timescales.to(device=hidden_states.device)
+        pos_embed = torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=-1)
+        return pos_embed.to(dtype=hidden_states.dtype)
 
 
 class Gemma4AudioSubsampleLayer(nn.Module):
@@ -78,10 +90,17 @@ class Gemma4AudioSubsampleLayer(nn.Module):
         self.conv = nn.Conv2d(in_channels, out_channels, 3, stride=2, padding=1, bias=False)
         self.norm = nn.LayerNorm(out_channels, eps=eps, elementwise_affine=True, bias=False)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, mask: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if mask is not None:
+            hidden_states = hidden_states * mask[:, None, :, None]
         hidden_states = self.conv(hidden_states.to(self.conv.weight.dtype))
         hidden_states = self.norm(hidden_states.permute(0, 2, 3, 1))
-        return F.relu(hidden_states).permute(0, 3, 1, 2).contiguous()
+        hidden_states = F.relu(hidden_states).permute(0, 3, 1, 2).contiguous()
+        if mask is not None:
+            mask = mask[:, ::2]
+        return hidden_states, mask
 
 
 class Gemma4AudioSubsample(nn.Module):
@@ -93,18 +112,26 @@ class Gemma4AudioSubsample(nn.Module):
         self.input_proj_linear = nn.Linear((c0 // 4) * c1, config.hidden_size, bias=False)
         self.feature_size = feature_size
 
-    def forward(self, input_features: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_features: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         hidden_states = input_features.unsqueeze(1)
-        hidden_states = self.layer0(hidden_states)
-        hidden_states = self.layer1(hidden_states)
+        hidden_states, mask = self.layer0(hidden_states, attention_mask)
+        hidden_states, mask = self.layer1(hidden_states, mask)
         batch, _, length, width = hidden_states.shape
         hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, length, -1)
-        return self.input_proj_linear(hidden_states)
+        hidden_states = self.input_proj_linear(hidden_states)
+        if attention_mask is None:
+            return hidden_states
+        return hidden_states, mask
 
 
 class Gemma4AudioFeedForward(nn.Module):
     def __init__(self, config: Gemma4AudioConfig):
         super().__init__()
+        self.config = config
         self.ffw_layer_1 = Gemma4ClippedLinear(config.hidden_size, config.hidden_size * 4)
         self.ffw_layer_2 = Gemma4ClippedLinear(config.hidden_size * 4, config.hidden_size)
         self.pre_layer_norm = Gemma4RMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -112,19 +139,19 @@ class Gemma4AudioFeedForward(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         residual = hidden_states
+        limit = min(self.config.gradient_clipping, torch.finfo(hidden_states.dtype).max)
+        hidden_states = torch.clamp(hidden_states, -limit, limit)
         hidden_states = self.pre_layer_norm(hidden_states)
         hidden_states = F.silu(self.ffw_layer_1(hidden_states))
         hidden_states = self.ffw_layer_2(hidden_states)
+        hidden_states = torch.clamp(hidden_states, -limit, limit)
         hidden_states = self.post_layer_norm(hidden_states)
-        return residual + self.configured_scale(hidden_states)
-
-    def configured_scale(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return hidden_states * 0.5
-
+        return residual + hidden_states * self.config.residual_weight
 
 class Gemma4AudioLightConv(nn.Module):
     def __init__(self, config: Gemma4AudioConfig):
         super().__init__()
+        self.config = config
         h = config.hidden_size
         self.linear_start = Gemma4ClippedLinear(h, h * 2)
         self.linear_end = Gemma4ClippedLinear(h, h)
@@ -139,6 +166,8 @@ class Gemma4AudioLightConv(nn.Module):
         left_pad = self.depthwise_conv1d.kernel_size[0] - 1
         hidden_states = F.pad(hidden_states.transpose(1, 2), (left_pad, 0))
         hidden_states = self.depthwise_conv1d(hidden_states).transpose(1, 2)
+        limit = min(self.config.gradient_clipping, torch.finfo(hidden_states.dtype).max)
+        hidden_states = torch.clamp(hidden_states, -limit, limit)
         hidden_states = F.silu(self.conv_norm(hidden_states))
         return residual + self.linear_end(hidden_states)
 
@@ -150,13 +179,19 @@ class Gemma4AudioAttention(nn.Module):
         self.config = config
         self.head_dim = h // config.num_attention_heads
         self.num_heads = config.num_attention_heads
+        self.q_scale = (self.head_dim ** -0.5) / math.log(2)
+        self.k_scale = math.log(1 + math.e) / math.log(2)
         self.q_proj = Gemma4ClippedLinear(h, h)
         self.k_proj = Gemma4ClippedLinear(h, h)
         self.v_proj = Gemma4ClippedLinear(h, h)
         self.post = Gemma4ClippedLinear(h, h)
         self.relative_k_proj = nn.Linear(h, h, bias=False)
         self.per_dim_scale = nn.Parameter(torch.zeros(self.head_dim))
-        self.softcap = config.attention_logit_cap
+        self.register_buffer(
+            "softcap",
+            torch.tensor(config.attention_logit_cap),
+            persistent=False,
+        )
         self.chunk_size = config.attention_chunk_size
         self.max_past_horizon = config.attention_context_left - 1
         self.max_future_horizon = config.attention_context_right
@@ -181,15 +216,20 @@ class Gemma4AudioAttention(nn.Module):
             values.shape[0], values.shape[1], blocks, chunk, self.context_size
         )
 
-    def forward(self, hidden_states: torch.Tensor, position_embeddings: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         batch, length, _ = hidden_states.shape
         shape = (batch, length, self.num_heads, self.head_dim)
         q = self.q_proj(hidden_states).float().view(shape)
         k = self.k_proj(hidden_states).float().view(shape)
         v = self.v_proj(hidden_states).float().view(shape)
-        q = q * ((self.head_dim ** -0.5) / torch.log(torch.tensor(2., device=q.device)))
+        q = q * self.q_scale
         q = q * F.softplus(self.per_dim_scale)
-        k = k * (torch.log1p(torch.exp(torch.tensor(1., device=k.device))) / torch.log(torch.tensor(2., device=k.device)))
+        k = k * self.k_scale
         qb = self._blocks(q); kc = self._contexts(k); vc = self._contexts(v)
         blocks = qb.shape[1]
         relative = self.relative_k_proj(position_embeddings).float().view(-1, self.num_heads, self.head_dim)
@@ -199,22 +239,26 @@ class Gemma4AudioAttention(nn.Module):
                @ relative.permute(1, 2, 0))
         rel = rel.reshape(batch, self.num_heads, blocks, self.chunk_size, -1)
         scores = self._relative_shift(rel) + scores
-        scores = torch.tanh(scores / self.softcap) * self.softcap
-        qpos = torch.arange(blocks * self.chunk_size, device=hidden_states.device)
-        offsets = torch.arange(self.context_size, device=hidden_states.device)
-        kpos = qpos[:, None] - self.max_past_horizon + offsets[None, :]
-        allowed = (kpos >= 0) & (kpos <= qpos[:, None] + self.max_future_horizon)
-        allowed = allowed.reshape(blocks, self.chunk_size, self.context_size)
-        scores = scores.masked_fill(~allowed[None, None], -1e9)
-        weights = torch.softmax(scores, dim=-1, dtype=torch.float32).to(vc.dtype)
+        scores = scores / self.softcap
+        scores = torch.tanh(scores)
+        scores = scores * self.softcap
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device=scores.device)
+            scores = scores.masked_fill(
+                attention_mask.logical_not(),
+                self.config.attention_invalid_logits_value,
+            )
+        weights = F.softmax(scores, dim=-1, dtype=torch.float32).to(vc.dtype)
         output = (weights @ vc.permute(0, 3, 1, 2, 4)).permute(0, 2, 3, 1, 4)
-        output = output.reshape(batch, blocks * self.chunk_size, -1)[:, :length]
+        output = output.reshape(batch, blocks * self.chunk_size, -1)
+        output = output[:, :length].contiguous()
         return self.post(output.to(hidden_states.dtype))
 
 
 class Gemma4AudioLayer(nn.Module):
     def __init__(self, config: Gemma4AudioConfig):
         super().__init__()
+        self.config = config
         self.feed_forward1 = Gemma4AudioFeedForward(config)
         self.feed_forward2 = Gemma4AudioFeedForward(config)
         self.self_attn = Gemma4AudioAttention(config)
@@ -223,13 +267,25 @@ class Gemma4AudioLayer(nn.Module):
         self.norm_post_attn = Gemma4RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.norm_out = Gemma4RMSNorm(config.hidden_size, config.rms_norm_eps)
 
-    def forward(self, hidden_states: torch.Tensor, position_embeddings: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         hidden_states = self.feed_forward1(hidden_states)
         residual = hidden_states
-        hidden_states = self.self_attn(self.norm_pre_attn(hidden_states), position_embeddings)
+        limit = min(self.config.gradient_clipping, torch.finfo(hidden_states.dtype).max)
+        hidden_states = torch.clamp(hidden_states, -limit, limit)
+        hidden_states = self.self_attn(
+            self.norm_pre_attn(hidden_states), position_embeddings, attention_mask
+        )
+        hidden_states = torch.clamp(hidden_states, -limit, limit)
         hidden_states = residual + self.norm_post_attn(hidden_states)
         hidden_states = self.lconv1d(hidden_states)
-        return self.norm_out(self.feed_forward2(hidden_states))
+        hidden_states = self.feed_forward2(hidden_states)
+        hidden_states = torch.clamp(hidden_states, -limit, limit)
+        return self.norm_out(hidden_states)
 
 
 class Gemma4AudioModel(nn.Module):
@@ -243,12 +299,69 @@ class Gemma4AudioModel(nn.Module):
             for _ in range(self.config.num_hidden_layers)
         ])
         self.output_proj = nn.Linear(
-            self.config.hidden_size, self.config.output_proj_dims
+            self.config.hidden_size, self.config.output_proj_dims, bias=True
         )
 
-    def forward(self, input_features: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.subsample_conv_projection(input_features)
+    def forward(
+        self,
+        input_features: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        subsampled = self.subsample_conv_projection(input_features, attention_mask)
+        if attention_mask is None:
+            hidden_states = subsampled
+            output_mask = torch.ones(
+                hidden_states.shape[0], hidden_states.shape[1],
+                dtype=torch.bool, device=hidden_states.device
+            )
+        else:
+            hidden_states, output_mask = subsampled
         position_embeddings = self.rel_pos_enc(hidden_states)
+        length = hidden_states.shape[1]
+        blocks = (length + self.config.attention_chunk_size - 1) // self.config.attention_chunk_size
+        padded = blocks * self.config.attention_chunk_size
+        valid = output_mask.to(device=hidden_states.device, dtype=torch.bool)
+        valid = valid[:, :length]
+        context_size = (
+            self.config.attention_chunk_size
+            + self.config.attention_context_left - 1
+            + self.config.attention_context_right
+        )
+        query = torch.arange(length, device=hidden_states.device)[:, None]
+        key = torch.arange(length, device=hidden_states.device)[None, :]
+        distance = query - key
+        left_mask = (distance >= 0) & (
+            distance < self.config.attention_context_left - 1
+        )
+        right_mask = (distance < 0) & (
+            -distance < self.config.attention_context_right
+        )
+        standard = (left_mask | right_mask)[None, None]
+        standard = standard & valid[:, None, None, :]
+        standard = torch.where(
+            standard,
+            torch.zeros((), dtype=hidden_states.dtype, device=hidden_states.device),
+            torch.finfo(hidden_states.dtype).min,
+        )
+        standard = F.pad(
+            standard, (0, padded - length, 0, padded - length), value=False
+        )
+        standard = standard.reshape(
+            standard.shape[0], 1, blocks, self.config.attention_chunk_size, padded
+        )
+        standard = F.pad(
+            standard,
+            (self.config.attention_context_left - 1, self.config.attention_context_right),
+            value=False,
+        )
+        block_starts = torch.arange(blocks, device=hidden_states.device)
+        block_starts = block_starts * self.config.attention_chunk_size
+        offsets = torch.arange(context_size, device=hidden_states.device)
+        key_indices = block_starts[:, None] + offsets[None, :]
+        key_indices = key_indices[None, None, :, None, :].expand(
+            standard.shape[0], 1, blocks, self.config.attention_chunk_size, context_size
+        )
+        attention_mask = torch.gather(standard, -1, key_indices)
         for layer in self.layers:
-            hidden_states = layer(hidden_states, position_embeddings)
+            hidden_states = layer(hidden_states, position_embeddings, attention_mask)
         return self.output_proj(hidden_states)

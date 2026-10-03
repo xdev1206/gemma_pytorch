@@ -1,61 +1,20 @@
-import json
 import unittest
 from pathlib import Path
 
+try:
+    from .alignment_support import model_spec, require_model
+except ImportError:
+    from alignment_support import model_spec, require_model
+
 
 ROOT = Path(__file__).resolve().parents[1]
-CASES = ROOT / "tests" / "data" / "alignment_cases.json"
-
-
-class AlignmentDataTest(unittest.TestCase):
-
-    def test_alignment_manifest_is_complete(self):
-        manifest = json.loads(CASES.read_text(encoding="utf-8"))
-        self.assertEqual(
-            {model["id"] for model in manifest["models"]},
-            {"gemma-3-1b-it", "gemma-4-E2B-it"},
-        )
-        for model in manifest["models"]:
-            model_dir = ROOT / model["path"]
-            if not model_dir.is_dir():
-                self.skipTest(
-                    f"{model_dir} is unavailable; download the alignment models first"
-                )
-            self.assertTrue((model_dir / model["checkpoint"]).is_file())
-        for image in manifest["images"]:
-            self.assertTrue((ROOT / image["path"]).is_file(), image["path"])
-
-    def test_checkpoint_readiness_is_explicit(self):
-        manifest = json.loads(CASES.read_text(encoding="utf-8"))
-        statuses = {model["id"]: model["status"] for model in manifest["models"]}
-        self.assertEqual(
-            statuses["gemma-3-1b-it"], "runtime-smoke-aligned"
-        )
-        self.assertEqual(
-            statuses["gemma-4-E2B-it"],
-            "runtime-token-aligned-numerical-pending",
-        )
-        baseline = next(
-            item for item in manifest["models"] if item["id"] == "gemma-4-E2B-it"
-        )["runtime_baseline"]
-        self.assertEqual(baseline["expected_next_token_id"], 5279)
-        self.assertEqual(baseline["multimodal_expected_next_token_id"], 106)
-
-    def test_gemma3_checkpoint_has_expected_format(self):
-        manifest = json.loads(CASES.read_text(encoding="utf-8"))
-        model = next(item for item in manifest["models"]
-                     if item["id"] == "gemma-3-1b-it")
-        self.assertEqual(model["checkpoint"], "model.safetensors")
-        self.assertTrue(
-            (ROOT / model["path"] / model["checkpoint"]).is_file()
-        )
-        baseline = model["runtime_baseline"]
-        self.assertEqual(baseline["prompt"], "The capital of Italy is")
-        self.assertEqual(baseline["expected_output"], " Rome.")
-
-
 try:
     import torch
+except ImportError:
+    torch = None
+
+if torch is not None:
+  try:
     from PIL import Image
 
     from gemma import config
@@ -63,7 +22,7 @@ try:
     from gemma.gemma3_preprocessor import gemma3_input_preprocessor
     from gemma.siglip_vision import pan_and_scan
     from gemma.siglip_vision import preprocessor as vision_preprocessor
-except ImportError:
+  except ImportError:
     torch = None
 
 
@@ -145,8 +104,9 @@ class DeterministicAlignmentTest(unittest.TestCase):
     def test_gemma4_checkpoint_config_matches_text_backbone(self):
         from gemma.gemma4_config import Gemma4TextConfig
 
+        model_dir = require_model(model_spec("gemma-4-E2B-it"))
         model_config = Gemma4TextConfig.from_json(
-            ROOT / "models/gemma-4-E2B-it/config.json"
+            model_dir / "config.json"
         )
         self.assertEqual(model_config.num_hidden_layers, 35)
         self.assertEqual(model_config.layer_head_dim(0), 256)
@@ -185,8 +145,9 @@ class DeterministicAlignmentTest(unittest.TestCase):
     def test_gemma4_vision_config_matches_checkpoint(self):
         from gemma.gemma4_vision import Gemma4VisionConfig
 
+        model_dir = require_model(model_spec("gemma-4-E2B-it"))
         config = Gemma4VisionConfig.from_json(
-            ROOT / "models/gemma-4-E2B-it/config.json"
+            model_dir / "config.json"
         )
         self.assertEqual(config.num_hidden_layers, 16)
         self.assertEqual(config.position_embedding_size, 10240)

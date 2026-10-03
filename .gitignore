@@ -168,6 +168,7 @@ cython_debug/
 
 # Results
 *.csv
+tests/reports/
 
 # Python pickle files
 *.pkl

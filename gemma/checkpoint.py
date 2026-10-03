@@ -72,7 +72,12 @@ def load_gemma3_text_safetensors(model: torch.nn.Module, model_path: str) -> Non
             q = reader.get_tensor(f"{source}.self_attn.q_proj.weight")
             k = reader.get_tensor(f"{source}.self_attn.k_proj.weight")
             v = reader.get_tensor(f"{source}.self_attn.v_proj.weight")
-            state[f"{local}.self_attn.qkv_proj.weight"] = torch.cat((q, k, v), dim=0)
+            _direct_assign(
+                model,
+                f"{local}.self_attn.qkv_proj.weight",
+                torch.cat((q, k, v), dim=0),
+            )
+            mapped.add(f"{local}.self_attn.qkv_proj.weight")
             for suffix in (
                 "o_proj",
                 "q_norm",

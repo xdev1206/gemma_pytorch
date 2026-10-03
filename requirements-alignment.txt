@@ -1,0 +1,2 @@
+# Reference implementation used only by the Gemma 4 alignment tests.
+transformers>=5.18.0

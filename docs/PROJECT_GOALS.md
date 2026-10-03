@@ -43,18 +43,32 @@
 - 使用上述固定模型、prompt、图片和合理数值容差，与参考项目进行输出或行为对比。
 - 新增模型能力时同步更新测试、运行示例和相关文档。
 
-## 对齐测试数据
+## 对齐测试架构
 
-测试用例和输入清单位于 `tests/`：`tests/data/alignment_cases.json` 固定
-模型、prompt、图片及多模态交错输入；确定性测试位于 `tests/test_alignment.py`。
-使用 `python -m unittest tests.test_alignment -v` 运行；如果 `models/` 或依赖
-缺失，测试应明确提示下载模型或安装依赖。真实 checkpoint 数值对齐应将临时
-输出放在仓库外，并记录模型、设备、dtype、生成长度和容差。Gemma 3 1B 已完成
-`model.safetensors` loader 适配，并已完成一次固定 prompt 的 CUDA smoke 对齐；Gemma 4 E2B 已完成
-文本、视觉、音频骨干、tokenizer 和图像 processor 已适配，并已完成固定文本
-prompt 的 CUDA 下一个 token 对齐；音频 processor 及完整多模态数值一致性对齐
-仍需实现严格的全场景数值容差覆盖。固定图像+文本 CUDA/bfloat16 用例已完成
-端到端对齐：top-1/top-5 token 一致，平均 logits 误差约为 `0.21`。
+Gemma 4 验收采用清单、契约、checkpoint 加载、运行时行为和参考数值对齐五层结构。
+`tests/data/alignment_cases.json` 固定模型、prompt、图片、设备、dtype、seed 和容差；
+`tests/test_manifest.py` 验证清单和资源；`tests/test_alignment.py` 验证组件契约；
+`tests/test_runtime_alignment.py` 在显式开启时加载真实 checkpoint，覆盖文本、图片
+next-token 和音频 multimodal forward；`tests/test_gemma4_reference_alignment.py`
+使用同一 checkpoint 的 Transformers Gemma 4 实现比较文本 logits、贪心生成、视觉特征
+和音频特征。
+使用 `python -m unittest tests.test_manifest tests.test_alignment tests.test_checkpoint_loading -v`
+运行快速检查；设置 `GEMMA_RUN_RUNTIME_ALIGNMENT=1` 后运行真实 checkpoint 对齐。
+如果 `models/` 或依赖缺失，测试必须明确提示下载模型或安装依赖。完整 Gemma 4
+checkpoint 数值对齐必须同时满足 logits 最大/平均绝对误差、文本多 token 贪心生成、
+视觉特征、音频特征和图像行为的参考比较；next-token 单点匹配不能替代数值验收。
+当前文本与参考默认输出仍有约 `0.5` 的最大 logits 误差，但根因已确定为 attention backend 不一致：Transformers 参考默认使用 `sdpa`，本地实现使用 eager。正式参考对齐测试在 `from_pretrained` 时显式传入 `attn_implementation="eager"`，并断言顶层和语言模型配置均为 eager；在此契约下，本地 logits 与参考逐元素一致（`max_abs=0`），文本贪心生成也已通过。生成器同时读取 checkpoint 的 EOS ID 列表（`1`、`106`），在生成 EOS 后停止，匹配 Transformers 的序列长度行为。本地与参考默认 `sdpa` 的差异为 `max_abs=0.5、mean_abs≈0.05424`，参考 `sdpa` 与 eager 也有同样差异。第 0 层主输入、input Norm、Q/K/V 投影及其 Norm、RoPE 前后 Q/K 均一致；参考 eager attention 下 GQA 后 K/V、softmax 权重、value 聚合、`o_proj` 输入及输出也均为逐元素一致。因此不应继续修改 eager attention 数学逻辑；若未来验收 SDPA，必须另行实现并验证对应 backend。
+音频对齐已确认 subsample 输出与参考完全一致；位置编码现在先以 FP32 计算 `inv_timescales`，再转换为当前模型默认 dtype，匹配参考的构造后转换顺序，也修复了本地 checkpoint loader 不会转换非持久 buffer 的问题。运行时位置编码回归测试现已完全一致（`MSE=0`、`max_abs=0`）。真实音频下，第 0 层的 subsample、position、FFN1、pre-attention norm、Q/K/V 和 relative-K 投影均完全一致。本地现在传播两层 subsample mask，构造参考风格的 4D sliding mask，转换为 BF16 additive mask，执行相同的 blocked padding/gather，并在 eager attention 中使用 `attention_mask.logical_not()`。运行时逐元素对比确认参考和本地 blocked mask 完全一致：`shape=[1,1,3,12,24]`、BF16、`MSE=0`、`max_abs=0`、`0/864` 不一致；4D mask 的 `391` 个 invalid 值和 `234` 个零值也完全一致。音频端到端最大误差为 `1.1875`。真实音频下第 0、1 层完全一致；第 2 层首先在 `self_attn` 出现差异（`max_abs=0.0078125`，30 个元素），后续 RMSNorm 在接近零向量上将其放大（`max_abs=270.65625`）。逐张量追踪显示差异首发于 softcap：Q/K/V、relative-K、AC、BD 和 softcap 前 score 完全一致，融合表达式与参考三步计算的最大差异为 `7.6293945e-06`。本地已同步参考的 softcap 三步、`F.softmax`、条件 mask 和 post 前 contiguous 操作。
+进一步追踪确认 softcap 差异根因是 dtype：参考将 softcap 注册为 non-persistent BF16 buffer，本地此前使用 Python float。现已改为按模型构造 dtype 创建 non-persistent tensor buffer，并保留参考的 softcap 三步、`F.softmax`、条件 mask 和 post 前 contiguous 操作。
+
+视觉对齐逐层检查确认 patch embedding、layer 0 输入 norm、Q/K/V 投影及 Q/K norm 完全一致；首次差异出现在 self-attention 内部。参考在 RoPE 旋转前将 cos/sin 转为 BF16，本地此前在 FP32 cos/sin 下完成乘加后才转换；本地已同步为先转换 cos/sin 再旋转。
+RoPE 修复后，16 个 vision layer 的有效 token 边界均完全一致；剩余差异来自 pooling 的 dtype 顺序。参考先将 FP32 平均池化结果转换为 BF16，再乘 `sqrt(hidden_size)`，本地已同步该顺序。
+视觉 pooling 的最终缩放也已显式按参考执行：BF16 池化结果先转 FP32，再乘 `sqrt(hidden_size)` 后转换回模型 dtype。
+视觉 tower 不再提前裁剪 padding patch，而是与参考一样保留 padding 参与零值池化，再使用 pool mask 移除 padding soft tokens，以保持矩阵归约顺序一致。
+真实 checkpoint 验证中，视觉特征和图文 logits 对齐测试均已通过。
+
+Gemma 3 1B 当前仅保留文本 smoke baseline，Gemma 3 多模态和数值容差属于待完善项，
+不纳入本轮 Gemma 4 验收门槛。
 
 ## 范围边界
 

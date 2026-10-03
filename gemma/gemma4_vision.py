@@ -108,8 +108,8 @@ class Gemma4VisionAttention(nn.Module):
             part = states[..., axis * axis_dim:(axis + 1) * axis_dim]
             positions = position_ids[..., axis].float()
             freqs = positions[..., None] * inv_freq
-            cos = freqs.cos().unsqueeze(2)
-            sin = freqs.sin().unsqueeze(2)
+            cos = freqs.cos().unsqueeze(2).to(dtype=states.dtype)
+            sin = freqs.sin().unsqueeze(2).to(dtype=states.dtype)
             first, second = part[..., :half], part[..., half:]
             pieces.append(torch.cat((first * cos - second * sin,
                                      first * sin + second * cos), dim=-1))
@@ -193,17 +193,12 @@ class Gemma4VisionModel(nn.Module):
             pixel_position_ids: ``[batch, patches, 2]``; ``(-1, -1)`` pads.
             output_length: number of pooled soft tokens. Defaults to one 3x3 pool.
         """
-        output_dtype = pixel_values.dtype
+        # Processors produce float32 tensors, while checkpoint-backed vision
+        # projections commonly use bfloat16. Return the model dtype so the
+        # vision-to-text projection receives the same dtype as its weights.
+        output_dtype = self.patch_embedder.input_proj.weight.dtype
         padding = (pixel_position_ids == -1).all(dim=-1)
         positions = pixel_position_ids.clamp(min=0)
-        # Padding is only a batching convenience. Trim it before attention so
-        # padded patches do not create invalid all-masked softmax rows.
-        if padding.any():
-            valid_length = int((~padding[0]).sum())
-            pixel_values = pixel_values[:, :valid_length]
-            pixel_position_ids = pixel_position_ids[:, :valid_length]
-            padding = padding[:, :valid_length]
-            positions = pixel_position_ids.clamp(min=0)
         x = self.patch_embedder(pixel_values, pixel_position_ids, padding)
         for layer in self.layers:
             x = layer(x, pixel_position_ids, ~padding)
@@ -223,4 +218,8 @@ class Gemma4VisionModel(nn.Module):
             kernel_index = kernel_index[..., 0] + (max_x // kernel) * kernel_index[..., 1]
             weights = F.one_hot(kernel_index.long(), output_length).float() / (kernel * kernel)
             x = weights.transpose(1, 2) @ x.float()
-        return (x * self.config.hidden_size ** 0.5).to(output_dtype)
+            x = x.to(output_dtype)
+            pool_mask = torch.logical_not((weights == 0).all(dim=1))
+            if not pool_mask.all():
+                x = x[pool_mask]
+        return (x.float() * self.config.hidden_size ** 0.5).to(output_dtype)

@@ -23,9 +23,14 @@ Docker image and run an inference script, supplying `--ckpt` and `--variant`.
 Use `--device=cuda` for GPU inference. XLA runs require the matching Docker
 recipe and `PJRT_DEVICE=CPU`, `TPU`, or `CUDA`.
 
-Tests use Python's standard `unittest` runner; run them with
-`python -m unittest tests.test_alignment -v`. Validate changes with the
-relevant inference example and compile checks such as
+Tests use Python's standard `unittest` runner. Run the fast manifest, contract,
+and checkpoint-loader checks with
+`python -m unittest tests.test_manifest tests.test_alignment tests.test_checkpoint_loading -v`.
+Run real checkpoint baselines explicitly with
+`GEMMA_RUN_RUNTIME_ALIGNMENT=1 python -m unittest tests.test_runtime_alignment -v`.
+Gemma 4 reference acceptance additionally requires `requirements-alignment.txt`
+and `GEMMA_RUN_RUNTIME_ALIGNMENT=1 python -m unittest tests.test_gemma4_reference_alignment -v`.
+Validate changes with the relevant inference example and compile checks such as
 `python -m compileall gemma scripts tests`. There is no configured formatter or
 linter. The `safetensors` and `tokenizers` dependencies are required for
 Hugging Face checkpoint and Gemma 4 tokenizer loading; the Gemma 4 processor

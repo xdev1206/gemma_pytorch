@@ -13,6 +13,7 @@
       ],
       "runtime_baseline": {
         "device": "cuda",
+        "dtype": "float32",
         "seed": 12345,
         "output_len": 2,
         "prompt": "The capital of Italy is",
@@ -29,14 +30,18 @@
       "runtime_baseline": {
         "device": "cuda",
         "dtype": "bfloat16",
+        "seed": 12345,
         "prompt": "The capital of Italy is",
-        "expected_next_token_id": 5279,
-        "expected_next_token": " capital",
+        "expected_next_token_id": 13706,
+        "expected_next_token": " Rome",
         "multimodal_prompt": "Caption this image.",
         "multimodal_image": "golden_test_image",
         "multimodal_expected_next_token_id": 106,
         "multimodal_expected_next_token": "<turn|>",
-        "multimodal_mean_abs_logit_error": 0.209
+        "multimodal_mean_abs_logit_error": 0.209,
+        "reference_backend": "transformers>=5.18.0",
+        "reference_max_abs_logit_error": 0.01,
+        "reference_mean_abs_logit_error": 0.001
       },
       "text_prompts": [
         "The capital of Italy is",
