@@ -78,8 +78,8 @@ class DeterministicAlignmentTest(unittest.TestCase):
         self.assertEqual(processed[1].shape[0], 3)
 
     def test_gemma4_text_backbone_forward(self):
-        from gemma.gemma4_config import Gemma4TextConfig
-        from gemma.gemma4_model import Gemma4ForCausalLM
+        from gemma.gemma4.gemma4_config import Gemma4TextConfig
+        from gemma.gemma4.gemma4_model import Gemma4ForCausalLM
 
         model_config = Gemma4TextConfig(
             vocab_size=128,
@@ -102,7 +102,7 @@ class DeterministicAlignmentTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(logits).all())
 
     def test_gemma4_checkpoint_config_matches_text_backbone(self):
-        from gemma.gemma4_config import Gemma4TextConfig
+        from gemma.gemma4.gemma4_config import Gemma4TextConfig
 
         model_dir = require_model(model_spec("gemma-4-E2B-it"))
         model_config = Gemma4TextConfig.from_json(
@@ -114,7 +114,7 @@ class DeterministicAlignmentTest(unittest.TestCase):
         self.assertEqual(model_config.hidden_size_per_layer_input, 256)
 
     def test_gemma4_vision_patch_encoder(self):
-        from gemma.gemma4_vision import Gemma4VisionConfig, Gemma4VisionModel
+        from gemma.gemma4.gemma4_vision import Gemma4VisionConfig, Gemma4VisionModel
 
         vision_config = Gemma4VisionConfig(
             hidden_size=32,
@@ -133,7 +133,7 @@ class DeterministicAlignmentTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(output).all())
 
     def test_gemma4_image_processor_patch_contract(self):
-        from gemma.gemma4_processor import Gemma4ImageProcessor
+        from gemma.gemma4.gemma4_processor import Gemma4ImageProcessor
 
         processed = Gemma4ImageProcessor(max_soft_tokens=1)(
             Image.new("RGB", (64, 48), color=(128, 64, 32))
@@ -143,7 +143,7 @@ class DeterministicAlignmentTest(unittest.TestCase):
         self.assertEqual(processed["num_soft_tokens"], 1)
 
     def test_gemma4_vision_config_matches_checkpoint(self):
-        from gemma.gemma4_vision import Gemma4VisionConfig
+        from gemma.gemma4.gemma4_vision import Gemma4VisionConfig
 
         model_dir = require_model(model_spec("gemma-4-E2B-it"))
         config = Gemma4VisionConfig.from_json(
@@ -154,9 +154,9 @@ class DeterministicAlignmentTest(unittest.TestCase):
         self.assertEqual(config.pooling_kernel_size, 3)
 
     def test_gemma4_multimodal_forward_inserts_image_tokens(self):
-        from gemma.gemma4_config import Gemma4TextConfig
-        from gemma.gemma4_model import Gemma4ForConditionalGeneration
-        from gemma.gemma4_vision import Gemma4VisionConfig
+        from gemma.gemma4.gemma4_config import Gemma4TextConfig
+        from gemma.gemma4.gemma4_model import Gemma4ForConditionalGeneration
+        from gemma.gemma4.gemma4_vision import Gemma4VisionConfig
 
         text_config = Gemma4TextConfig(
             vocab_size=64,
@@ -187,7 +187,7 @@ class DeterministicAlignmentTest(unittest.TestCase):
         self.assertEqual(tuple(logits.shape), (1, 2, 64))
 
     def test_gemma4_audio_forward(self):
-        from gemma.gemma4_audio import Gemma4AudioConfig, Gemma4AudioModel
+        from gemma.gemma4.gemma4_audio import Gemma4AudioConfig, Gemma4AudioModel
 
         audio_config = Gemma4AudioConfig(
             hidden_size=32,
@@ -203,7 +203,7 @@ class DeterministicAlignmentTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(output).all())
 
     def test_gemma4_audio_processor_contract(self):
-        from gemma.gemma4_processor import Gemma4AudioProcessor
+        from gemma.gemma4.gemma4_processor import Gemma4AudioProcessor
 
         features = Gemma4AudioProcessor()(torch.zeros(16000))
         self.assertEqual(features.shape[0], 1)
@@ -211,9 +211,11 @@ class DeterministicAlignmentTest(unittest.TestCase):
         self.assertGreater(features.shape[1], 0)
 
     def test_gemma4_tokenizer_json_contract(self):
-        from gemma.gemma4_tokenizer import Gemma4Tokenizer
+        from gemma.gemma4.gemma4_tokenizer import Gemma4Tokenizer
 
-        model_tokenizer = Gemma4Tokenizer(ROOT / "models/gemma-4-E2B-it")
+        model_tokenizer = Gemma4Tokenizer(
+            require_model(model_spec("gemma-4-E2B-it"))
+        )
         token_ids = model_tokenizer.encode(
             "The capital of Italy is", bos=True, eos=True
         )
@@ -225,8 +227,8 @@ class DeterministicAlignmentTest(unittest.TestCase):
         )
 
     def test_gemma4_greedy_generation(self):
-        from gemma.gemma4_config import Gemma4TextConfig
-        from gemma.gemma4_model import Gemma4ForConditionalGeneration
+        from gemma.gemma4.gemma4_config import Gemma4TextConfig
+        from gemma.gemma4.gemma4_model import Gemma4ForConditionalGeneration
 
         config = Gemma4TextConfig(
             vocab_size=32, hidden_size=16, intermediate_size=32,
@@ -240,9 +242,9 @@ class DeterministicAlignmentTest(unittest.TestCase):
         self.assertEqual(tuple(output.shape), (1, 4))
 
     def test_gemma4_multimodal_audio_token_insertion(self):
-        from gemma.gemma4_audio import Gemma4AudioConfig
-        from gemma.gemma4_config import Gemma4TextConfig
-        from gemma.gemma4_model import Gemma4ForConditionalGeneration
+        from gemma.gemma4.gemma4_audio import Gemma4AudioConfig
+        from gemma.gemma4.gemma4_config import Gemma4TextConfig
+        from gemma.gemma4.gemma4_model import Gemma4ForConditionalGeneration
 
         text_config = Gemma4TextConfig(
             vocab_size=64, hidden_size=32, intermediate_size=64,

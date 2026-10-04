@@ -2,9 +2,19 @@ import unittest
 from pathlib import Path
 
 try:
-    from .alignment_support import ROOT, load_manifest
+    from .alignment_support import (
+        ROOT,
+        load_manifest,
+        model_download_message,
+        required_model_files,
+    )
 except ImportError:
-    from alignment_support import ROOT, load_manifest
+    from alignment_support import (
+        ROOT,
+        load_manifest,
+        model_download_message,
+        required_model_files,
+    )
 
 
 class AlignmentManifestTest(unittest.TestCase):
@@ -19,15 +29,16 @@ class AlignmentManifestTest(unittest.TestCase):
                 self.assertIn(field, model, model.get("id"))
             model_dir = ROOT / model["path"]
             self.assertFalse(Path(model["path"]).is_absolute())
-            self.assertTrue(model_dir.is_dir(), f"download model into {model_dir}")
-            self.assertTrue(
-                (model_dir / model["checkpoint"]).is_file(),
-                f"missing checkpoint for {model['id']}; download the model first",
-            )
-            self.assertTrue(
-                (model_dir / model["tokenizer"]).is_file(),
-                f"missing tokenizer for {model['id']}; download the model first",
-            )
+            missing = []
+            if not model_dir.is_dir():
+                missing.append("model directory")
+            else:
+                missing.extend(
+                    name for name in required_model_files(model)
+                    if not (model_dir / name).is_file()
+                )
+            if missing:
+                self.fail(model_download_message(model, model_dir, missing))
             baseline = model["runtime_baseline"]
             self.assertIn("device", baseline)
             self.assertIn("dtype", baseline)
@@ -46,11 +57,15 @@ class AlignmentManifestTest(unittest.TestCase):
             "multimodal_expected_next_token_id",
             "multimodal_expected_next_token",
             "multimodal_image",
-            "reference_backend",
-            "reference_max_abs_logit_error",
-            "reference_mean_abs_logit_error",
         ):
             self.assertIn(field, baseline, field)
+        self.assertEqual(
+            baseline["reference"]["attention_backend"], "eager"
+        )
+        for field in ("package", "attention_backend", "max_abs_error", "mean_abs_error"):
+            self.assertIn(field, baseline["reference"], field)
+        self.assertIn("audio_prompt", baseline)
+        self.assertGreater(baseline["audio_samples"], 0)
 
 
 if __name__ == "__main__":

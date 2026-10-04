@@ -30,6 +30,9 @@ class AlignmentTestResult(unittest.TextTestResult):
         record = {"id": test.id(), "status": status}
         if detail:
             record["detail"] = detail
+        metrics = getattr(test, "_alignment_metrics", None)
+        if metrics:
+            record["metrics"] = metrics
         self.records.append(record)
 
     def addSuccess(self, test):
@@ -49,14 +52,26 @@ class AlignmentTestResult(unittest.TextTestResult):
         super().addSkip(test, reason)
 
 
-def build_report(result: AlignmentTestResult, duration_seconds: float) -> dict:
+def build_report(
+    result: AlignmentTestResult,
+    duration_seconds: float,
+    *,
+    profile: str = "all",
+    strict: bool = False,
+    metadata: dict | None = None,
+) -> dict:
     """Convert a unittest result into a stable, machine-readable report."""
     counts = {status: 0 for status in ("passed", "failed", "error", "skipped")}
     for record in result.records:
         counts[record["status"]] += 1
+    skipped_is_failure = strict and counts["skipped"] > 0
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "success": result.wasSuccessful(),
+        "success": result.wasSuccessful() and not skipped_is_failure,
+        "profile": profile,
+        "strict": strict,
+        "skipped_is_failure": skipped_is_failure,
+        "metadata": metadata or {},
         "duration_seconds": round(duration_seconds, 3),
         "summary": {
             "total": result.testsRun,
@@ -75,6 +90,8 @@ def _markdown_report(report: dict) -> str:
         f"- Status: **{status}**",
         f"- Generated: `{report['generated_at']}`",
         f"- Duration: `{report['duration_seconds']:.3f}s`",
+        f"- Profile: `{report['profile']}`",
+        f"- Strict: `{report['strict']}`",
         (
             "- Summary: "
             f"{summary['passed']} passed, {summary['failed']} failed, "
@@ -84,14 +101,17 @@ def _markdown_report(report: dict) -> str:
         "",
         "## Test Results",
         "",
-        "| Test | Status | Duration | Detail |",
-        "| --- | --- | ---: | --- |",
+        "| Test | Status | Duration | Detail | Metrics |",
+        "| --- | --- | ---: | --- | --- |",
     ]
     for record in report["tests"]:
         detail = record.get("detail", "").replace("\n", " ").replace("|", "\\|")
+        metrics = json.dumps(record.get("metrics", {}), ensure_ascii=False)
+        metrics = metrics.replace("|", "\\|")
         lines.append(
             f"| `{record['id']}` | {record['status']} | "
-            f"{record.get('duration_seconds', 0):.3f}s | {detail} |"
+            f"{record.get('duration_seconds', 0):.3f}s | {detail} | "
+            f"{metrics} |"
         )
     return "\n".join(lines) + "\n"
 

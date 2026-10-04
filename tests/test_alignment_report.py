@@ -25,6 +25,15 @@ class AlignmentReportTest(unittest.TestCase):
             self.assertTrue(markdown_path.is_file())
             self.assertIn("case.pass", markdown_path.read_text(encoding="utf-8"))
 
+    def test_strict_report_rejects_skipped_tests(self):
+        result = unittest.TestResult()
+        result.testsRun = 1
+        result.records = [{"id": "case.skip", "status": "skipped"}]
+        report = build_report(result, 0.1, profile="gemma4-reference", strict=True)
+
+        self.assertFalse(report["success"])
+        self.assertTrue(report["skipped_is_failure"])
+
 
 if __name__ == "__main__":
     unittest.main()

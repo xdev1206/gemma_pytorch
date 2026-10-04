@@ -2,12 +2,20 @@
 
 ## Project Structure & Module Organization
 
-This is a Python implementation of Gemma text and multimodal models. Core
-model, configuration, tokenizer, Gemma 4 processor, preprocessing, and SigLIP
-vision modules are under `gemma/`. Runnable inference examples are in `scripts/`: `run.py` for
-text, `run_multimodal.py` for image-plus-text, and `run_xla.py` for
-PyTorch/XLA. Tokenizer files live in `tokenizer/`, sample images in
-`scripts/images/`, and container recipes in `docker/`.
+This is a Python implementation of Gemma text and multimodal models. Shared
+Gemma 3 text modules are in `gemma/config.py`, `gemma/model.py`, and
+`gemma/tokenizer.py`; Gemma 3 composition and loading are in
+`gemma/gemma3_model.py`, `gemma/gemma3_preprocessor.py`, and
+`gemma/gemma3/checkpoint.py`. Gemma 4 text, vision, audio, processor, and
+tokenizer modules are in `gemma/gemma4/`, with loading in
+`gemma/gemma4/checkpoint.py`. Common safetensors helpers are in
+`gemma/checkpoint_utils.py`; `gemma/checkpoint.py` preserves compatibility
+imports. Runnable examples are in `scripts/`: `run.py` for text,
+`run_multimodal.py` for image-plus-text, and `run_xla.py` for PyTorch/XLA.
+Sample images are in `scripts/images/`, and alignment tests/reports are in
+`tests/`. Test inputs are defined in `tests/data/alignment_cases.json`; contract,
+runtime-smoke, and Gemma4 reference tests are selected through
+`tests/run_alignment.py`.
 
 ## Build, Test, and Development Commands
 
@@ -30,6 +38,13 @@ Run real checkpoint baselines explicitly with
 `GEMMA_RUN_RUNTIME_ALIGNMENT=1 python -m unittest tests.test_runtime_alignment -v`.
 Gemma 4 reference acceptance additionally requires `requirements-alignment.txt`
 and `GEMMA_RUN_RUNTIME_ALIGNMENT=1 python -m unittest tests.test_gemma4_reference_alignment -v`.
+The profiled runner is preferred for acceptance: use
+`python -m tests.run_alignment --profile contract`,
+`GEMMA_RUN_RUNTIME_ALIGNMENT=1 python -m tests.run_alignment --profile runtime-smoke`,
+or `GEMMA_RUN_RUNTIME_ALIGNMENT=1 python -m tests.run_alignment --profile gemma4-reference`.
+Runtime and reference profiles are strict: skipped tests are failures.
+For the complete acceptance report, use
+`GEMMA_RUN_RUNTIME_ALIGNMENT=1 python -m tests.run_alignment --profile all --strict`.
 Validate changes with the relevant inference example and compile checks such as
 `python -m compileall gemma scripts tests`. There is no configured formatter or
 linter. The `safetensors` and `tokenizers` dependencies are required for

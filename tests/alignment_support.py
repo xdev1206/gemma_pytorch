@@ -8,6 +8,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "tests" / "data" / "alignment_cases.json"
 
+MODEL_URLS = {
+    "gemma-3-1b-it": "https://huggingface.co/google/gemma-3-1b-it",
+    "gemma-4-E2B-it": "https://huggingface.co/google/gemma-4-E2B-it",
+}
+
+
+class ModelUnavailableError(FileNotFoundError):
+    """Raised when a required alignment model is not installed."""
+
 
 def load_manifest() -> dict:
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -29,12 +38,43 @@ def model_path(spec: dict) -> Path:
     return ROOT / spec["path"]
 
 
+def required_model_files(spec: dict) -> list[str]:
+    required = [spec["checkpoint"], spec["tokenizer"]]
+    if spec["id"] == "gemma-4-E2B-it":
+        required.insert(0, "config.json")
+    return required
+
+
+def model_download_message(spec: dict, path: Path, missing: list[str]) -> str:
+    model_id = spec["id"]
+    layout = "\n".join(
+        f"    ├── {name}" for name in required_model_files(spec)
+    )
+    return (
+        f"Model {model_id} is unavailable.\n"
+        f"Download: {MODEL_URLS[model_id]}\n"
+        "Expected local layout:\n"
+        "  models/ (symlink)\n"
+        f"  └── {model_id}/\n"
+        f"{layout}\n"
+        f"Missing: {', '.join(missing)}\n"
+        f"Resolved model directory: {path}"
+    )
+
+
 def require_model(spec: dict) -> Path:
     path = model_path(spec)
-    checkpoint = path / spec["checkpoint"]
-    if not path.is_dir() or not checkpoint.is_file():
-        raise unittest.SkipTest(
-            f"{path} or {checkpoint.name} is unavailable; download the alignment model first"
+    missing = []
+    if not path.is_dir():
+        missing.append("model directory")
+    else:
+        missing.extend(
+            name for name in required_model_files(spec)
+            if not (path / name).is_file()
+        )
+    if missing:
+        raise ModelUnavailableError(
+            model_download_message(spec, path, missing)
         )
     return path
 

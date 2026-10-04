@@ -4,7 +4,7 @@ from unittest import mock
 import torch
 from torch import nn
 
-from gemma.checkpoint import load_gemma3_text_safetensors
+from gemma.gemma3.checkpoint import load_gemma3_text_safetensors
 
 
 class _TinyAttention(nn.Module):
@@ -79,8 +79,13 @@ class CheckpointLoadingTest(unittest.TestCase):
             values[f"model.layers.0.{name}.weight"] = torch.ones(1)
 
         model = _TinyGemma3()
-        with mock.patch("gemma.checkpoint.os.path.isfile", return_value=True), \
-                mock.patch("gemma.checkpoint._open_safetensors", return_value=_Reader(values)):
+        with mock.patch(
+                "gemma.gemma3.checkpoint.resolve_safetensors_path",
+                return_value="/tmp/model.safetensors",
+        ), mock.patch(
+                "gemma.gemma3.checkpoint.open_safetensors",
+                return_value=_Reader(values),
+        ):
             load_gemma3_text_safetensors(model, "/tmp/model.safetensors")
 
         self.assertTrue(torch.equal(

@@ -32,25 +32,29 @@ class Gemma4ReferenceAlignmentTest(unittest.TestCase):
         spec = model_spec("gemma-4-E2B-it")
         cls.model_dir = require_model(spec)
         baseline = spec["runtime_baseline"]
-        cls.max_error = baseline["reference_max_abs_logit_error"]
-        cls.mean_error = baseline["reference_mean_abs_logit_error"]
+        cls.reference_config = baseline["reference"]
+        cls.max_error = cls.reference_config["max_abs_error"]
+        cls.mean_error = cls.reference_config["mean_abs_error"]
         cls.device = torch.device(baseline["device"])
         cls.dtype = getattr(torch, baseline["dtype"])
         cls.reference = Gemma4ForConditionalGeneration.from_pretrained(
             str(cls.model_dir),
             torch_dtype=cls.dtype,
             device_map=str(cls.device),
-            attn_implementation="eager",
+            attn_implementation=cls.reference_config["attention_backend"],
             local_files_only=True,
         ).eval()
-        if cls.reference.config._attn_implementation != "eager":
-            raise AssertionError("Gemma 4 reference must use the eager backend")
-        if cls.reference.model.language_model.config._attn_implementation != "eager":
+        backend = cls.reference_config["attention_backend"]
+        if cls.reference.config._attn_implementation != backend:
             raise AssertionError(
-                "Gemma 4 language model reference must use the eager backend"
+                "Gemma 4 reference backend does not match manifest"
             )
-        from gemma.gemma4_model import Gemma4ForConditionalGeneration as LocalModel
-        from gemma.gemma4_tokenizer import Gemma4Tokenizer
+        if cls.reference.model.language_model.config._attn_implementation != backend:
+            raise AssertionError(
+                "Gemma 4 language model reference backend does not match manifest"
+            )
+        from gemma.gemma4.gemma4_model import Gemma4ForConditionalGeneration as LocalModel
+        from gemma.gemma4.gemma4_tokenizer import Gemma4Tokenizer
 
         cls.local = LocalModel.from_pretrained(
             str(cls.model_dir), dtype=cls.dtype, device=cls.device
@@ -65,6 +69,13 @@ class Gemma4ReferenceAlignmentTest(unittest.TestCase):
 
     def _assert_close(self, actual, expected, label):
         difference = (actual.float() - expected.float()).abs()
+        self._alignment_metrics = getattr(self, "_alignment_metrics", {})
+        self._alignment_metrics[label] = {
+            "max_abs_error": difference.max().item(),
+            "mean_abs_error": difference.mean().item(),
+            "max_abs_threshold": self.max_error,
+            "mean_abs_threshold": self.mean_error,
+        }
         self.assertLessEqual(
             difference.max().item(), self.max_error,
             f"{label} max absolute error: {difference.max().item()}",
@@ -75,14 +86,18 @@ class Gemma4ReferenceAlignmentTest(unittest.TestCase):
         )
 
     def test_text_logits_match_reference(self):
-        input_ids = self._text_ids("The capital of Italy is")
-        with torch.no_grad():
-            reference = self.reference(input_ids=input_ids).logits
-            actual = self.local(input_ids)
-        self._assert_close(actual, reference, "Gemma 4 text logits")
+        spec = model_spec("gemma-4-E2B-it")
+        for prompt in spec["text_prompts"]:
+            with self.subTest(prompt=prompt):
+                input_ids = self._text_ids(prompt)
+                with torch.no_grad():
+                    reference = self.reference(input_ids=input_ids).logits
+                    actual = self.local(input_ids)
+                self._assert_close(actual, reference, f"text logits: {prompt}")
 
     def test_text_greedy_generation_matches_reference(self):
-        input_ids = self._text_ids("Explain gravity in one sentence.")
+        spec = model_spec("gemma-4-E2B-it")
+        input_ids = self._text_ids(spec["text_prompts"][1])
         with torch.no_grad():
             reference = self.reference.generate(
                 input_ids, max_new_tokens=4, do_sample=False
@@ -92,7 +107,7 @@ class Gemma4ReferenceAlignmentTest(unittest.TestCase):
 
     def test_vision_features_match_reference(self):
         from PIL import Image
-        from gemma.gemma4_processor import Gemma4ImageProcessor
+        from gemma.gemma4.gemma4_processor import Gemma4ImageProcessor
 
         image_path = require_image("golden_test_image")
         with Image.open(image_path) as image:
@@ -137,7 +152,7 @@ class Gemma4ReferenceAlignmentTest(unittest.TestCase):
 
     def test_image_text_logits_match_reference(self):
         from PIL import Image
-        from gemma.gemma4_processor import Gemma4ImageProcessor
+        from gemma.gemma4.gemma4_processor import Gemma4ImageProcessor
 
         spec = model_spec("gemma-4-E2B-it")["runtime_baseline"]
         image_path = require_image(spec["multimodal_image"])
@@ -177,9 +192,11 @@ class Gemma4ReferenceAlignmentTest(unittest.TestCase):
         self._assert_close(actual, reference, "Gemma 4 image-text logits")
 
     def test_audio_features_match_reference(self):
-        from gemma.gemma4_processor import Gemma4AudioProcessor
+        from gemma.gemma4.gemma4_processor import Gemma4AudioProcessor
 
-        features = Gemma4AudioProcessor()(torch.zeros(16000)).to(self.device)
+        spec = model_spec("gemma-4-E2B-it")
+        samples = spec["runtime_baseline"]["audio_samples"]
+        features = Gemma4AudioProcessor()(torch.zeros(samples)).to(self.device)
         mask = torch.ones(features.shape[:2], dtype=torch.bool, device=self.device)
         with torch.no_grad():
             actual = self.local.audio_tower(features)
@@ -187,6 +204,60 @@ class Gemma4ReferenceAlignmentTest(unittest.TestCase):
                 features, attention_mask=mask
             ).last_hidden_state
         self._assert_close(actual, reference, "Gemma 4 audio features")
+
+    def test_audio_text_logits_match_reference(self):
+        spec = model_spec("gemma-4-E2B-it")
+        baseline = spec["runtime_baseline"]
+        from gemma.gemma4.gemma4_processor import Gemma4AudioProcessor
+
+        features = Gemma4AudioProcessor()(torch.zeros(baseline["audio_samples"])).to(
+            self.device
+        )
+        with torch.no_grad():
+            local_audio = self.local.audio_tower(features)
+        audio_tokens = local_audio.shape[1]
+        text_ids = self.tokenizer.encode(
+            baseline["audio_prompt"], bos=False, eos=True
+        )
+        local_ids = torch.tensor(
+            [[
+                self.tokenizer.bos_id,
+                self.tokenizer.boa_id,
+                *([self.tokenizer.pad_id] * audio_tokens),
+                self.tokenizer.eoa_id,
+                *text_ids,
+            ]],
+            device=self.device,
+        )
+        local_mask = torch.tensor(
+            [[
+                False,
+                False,
+                *([True] * audio_tokens),
+                False,
+                *([False] * len(text_ids)),
+            ]],
+            device=self.device,
+        )
+        reference_audio_id = getattr(self.reference.config, "audio_token_id", None)
+        if reference_audio_id is None:
+            reference_audio_id = self.reference.config.get_text_config().audio_token_id
+        reference_ids = local_ids.masked_fill(local_mask, reference_audio_id)
+        feature_mask = torch.ones(
+            features.shape[:2], dtype=torch.bool, device=self.device
+        )
+        with torch.no_grad():
+            actual = self.local(
+                local_ids,
+                audio_features=features,
+                audio_token_mask=local_mask,
+            )
+            reference = self.reference(
+                input_ids=reference_ids,
+                input_features=features,
+                input_features_mask=feature_mask,
+            ).logits
+        self._assert_close(actual, reference, "Gemma 4 audio-text logits")
 
 
 if __name__ == "__main__":

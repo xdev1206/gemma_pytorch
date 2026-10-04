@@ -38,10 +38,15 @@
         "multimodal_image": "golden_test_image",
         "multimodal_expected_next_token_id": 106,
         "multimodal_expected_next_token": "<turn|>",
+        "audio_prompt": "Describe this audio.",
+        "audio_samples": 16000,
         "multimodal_mean_abs_logit_error": 0.209,
-        "reference_backend": "transformers>=5.18.0",
-        "reference_max_abs_logit_error": 0.01,
-        "reference_mean_abs_logit_error": 0.001
+        "reference": {
+          "package": "transformers>=5.18.0",
+          "attention_backend": "eager",
+          "max_abs_error": 0.01,
+          "mean_abs_error": 0.001
+        }
       },
       "text_prompts": [
         "The capital of Italy is",

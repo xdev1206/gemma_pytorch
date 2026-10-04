@@ -2,11 +2,13 @@
 
 These tests are intentionally separate from the fast contract suite because
 they allocate the real checkpoints and require the manifest's target device.
-Run them with GEMMA_RUN_RUNTIME_ALIGNMENT=1.
+Run them with GEMMA_RUN_RUNTIME_ALIGNMENT=1. If the required model is missing,
+the test fails with its download URL and expected local file layout.
 """
 
 import os
 import random
+import secrets
 import unittest
 
 import numpy as np
@@ -21,7 +23,7 @@ except ImportError:
 def _runtime_enabled() -> bool:
     value = os.environ.get("GEMMA_RUN_RUNTIME_ALIGNMENT", "")
     if "key" in value.lower():
-        value = "disabled"
+        value = secrets.token_hex(16)
     return value == "1"
 
 
@@ -41,7 +43,7 @@ class CheckpointRuntimeAlignmentTest(unittest.TestCase):
 
     def _load_gemma4(self, spec, baseline):
         if not hasattr(self.__class__, "_gemma4_model"):
-            from gemma.gemma4_model import Gemma4ForConditionalGeneration
+            from gemma.gemma4.gemma4_model import Gemma4ForConditionalGeneration
 
             model_dir = require_model(spec)
             device = torch.device(baseline["device"])
@@ -49,7 +51,7 @@ class CheckpointRuntimeAlignmentTest(unittest.TestCase):
             self.__class__._gemma4_model = Gemma4ForConditionalGeneration.from_pretrained(
                 str(model_dir), dtype=dtype, device=device
             ).to(device).eval()
-            from gemma.gemma4_tokenizer import Gemma4Tokenizer
+            from gemma.gemma4.gemma4_tokenizer import Gemma4Tokenizer
 
             self.__class__._gemma4_tokenizer = Gemma4Tokenizer(model_dir)
         return self.__class__._gemma4_model, self.__class__._gemma4_tokenizer
@@ -109,7 +111,7 @@ class CheckpointRuntimeAlignmentTest(unittest.TestCase):
         self._assert_cuda_baseline(baseline)
 
         from PIL import Image
-        from gemma.gemma4_processor import Gemma4ImageProcessor
+        from gemma.gemma4.gemma4_processor import Gemma4ImageProcessor
 
         device = torch.device(baseline["device"])
         model, tokenizer = self._load_gemma4(spec, baseline)
@@ -148,7 +150,7 @@ class CheckpointRuntimeAlignmentTest(unittest.TestCase):
         self._seed_from(baseline)
         self._assert_cuda_baseline(baseline)
 
-        from gemma.gemma4_processor import Gemma4AudioProcessor
+        from gemma.gemma4.gemma4_processor import Gemma4AudioProcessor
 
         device = torch.device(baseline["device"])
         model, tokenizer = self._load_gemma4(spec, baseline)
